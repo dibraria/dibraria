@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { fetchHTML } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -11,6 +12,7 @@ app.use(express.json());
 
 const STORES = { 'royal-sports': true, 'minkang': true };
 
+// HEADERS is kept for the image proxy endpoint which still uses axios.
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -34,12 +36,12 @@ app.get('/api/search', async (req, res) => {
     const url = `https://${store}.x.yupoo.com/search/album?uid=1&sort=unix&q=${encodeURIComponent(q)}`;
     console.log(`[SEARCH] ${url}`);
 
-    const { data } = await axios.get(url, {
-      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
-      timeout: 15000,
+    const html = await fetchHTML(url, {
+      referer: `https://${store}.x.yupoo.com/albums`,
+      timeout: 20000,
     });
 
-    const $ = cheerio.load(data);
+    const $ = cheerio.load(html);
     const albums = [];
     const seen = new Set();
 
@@ -106,12 +108,12 @@ app.get('/api/album', async (req, res) => {
     const url = `https://${store}.x.yupoo.com/albums/${id}?uid=1`;
     console.log(`[ALBUM] ${url}`);
 
-    const { data } = await axios.get(url, {
-      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
-      timeout: 15000,
+    const html = await fetchHTML(url, {
+      referer: `https://${store}.x.yupoo.com/albums`,
+      timeout: 20000,
     });
 
-    const $ = cheerio.load(data);
+    const $ = cheerio.load(html);
 
     const title = ($('h1').first().text()
       || $('[class*="album__title"],[class*="albumTitle"]').first().text()
@@ -192,12 +194,12 @@ app.get('/api/category', async (req, res) => {
     const url = `https://${store}.x.yupoo.com/categories/${id}?uid=1&page=${page}`;
     console.log(`[CATEGORY] ${url}`);
 
-    const { data } = await axios.get(url, {
-      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
-      timeout: 15000,
+    const html = await fetchHTML(url, {
+      referer: `https://${store}.x.yupoo.com/albums`,
+      timeout: 20000,
     });
 
-    const $ = cheerio.load(data);
+    const $ = cheerio.load(html);
     const albums = [];
     const seen = new Set();
 
