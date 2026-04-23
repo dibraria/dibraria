@@ -227,6 +227,37 @@ app.get('/api/category', async (req, res) => {
   }
 });
 
+
+// ── COLLECTION ────────────────────────────────────────────────────────────────
+// GET /api/collection?store=minkang&id=712891
+// Collections use a different URL pattern than categories
+app.get('/api/collection', async (req, res) => {
+  const { store, id, page = 1 } = req.query;
+
+  if (!store || !STORES[store]) return res.status(400).json({ error: 'Loja inválida.' });
+  if (!id)                       return res.status(400).json({ error: 'Parâmetro "id" é obrigatório.' });
+
+  try {
+    const url = `https://${store}.x.yupoo.com/collections/${id}?uid=1&page=${page}`;
+    console.log('[COLLECTION]', url);
+
+    const { data } = await axios.get(url, {
+      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
+      timeout: 15000,
+    });
+
+    const $      = cheerio.load(data);
+    const albums = parseAlbums($, store);
+
+    console.log(`[COLLECTION] ${albums.length} álbuns`);
+    res.json({ results: albums, total: albums.length, collectionId: id, store });
+
+  } catch (err) {
+    console.error('[COLLECTION ERROR]', err.message);
+    res.status(500).json({ error: 'Erro ao carregar coleção.', detail: err.message });
+  }
+});
+
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🚀 Dibraria backend rodando na porta ${PORT}`);
