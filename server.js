@@ -1,93 +1,110 @@
 const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
+const cors    = require('cors');
+const axios   = require('axios');
 const cheerio = require('cheerio');
-const { fetchHTML } = require('./scraper');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET'] }));
 app.use(express.json());
 
 const STORES = { 'royal-sports': true, 'minkang': true };
 
-// HEADERS is kept for the image proxy endpoint which still uses axios.
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9',
   'Accept-Encoding': 'gzip, deflate, br',
-  'Connection': 'keep-alive',
-  'Cache-Control': 'no-cache',
+  'Connection':      'keep-alive',
+  'Cache-Control':   'no-cache',
 };
 
-// ── SEARCH ───────────────────────────────────────────────────────────────────
-// GET /api/search?store=royal-sports&q=flamengo
+// ── helpers ──────────────────────────────────────────────────────────────────
+function parseAlbums($, store) {
+  const albums = [];
+  const seen   = new Set();
+
+  $('a[href*="/albums/"]').each((_, el) => {
+    const href       = $(el).attr('href') || '';
+    const albumMatch = href.match(/\/albums\/(\d+)/);
+    if (!albumMatch) return;
+
+    const albumId = albumMatch[1];
+    if (seen.has(albumId)) return;
+
+    const img = $(el).find('img');
+    let coverSrc =
+      img.filter('[src*="medium"]').first().attr('src') ||
+      img.filter('[src*="small"]').first().attr('src')  ||
+      img.first().attr('src')                           ||
+      img.first().attr('data-src')                      || '';
+
+    if (!coverSrc.includes('photo.yupoo.com')) return;
+    coverSrc = coverSrc
+      .replace('/small.', '/medium.')
+      .replace('/thumb.', '/medium.');
+
+    const title = (
+      $(el).attr('title') ||
+      $(el).find('[class*="title"],[class*="name"]').first().text() ||
+      $(el).text().split('\n')[0] ||
+      `Álbum ${albumId}`
+    ).trim().replace(/\s*\d+\s*$/, '');
+
+    const nums       = $(el).text().match(/\b(\d+)\b/g);
+    const photoCount = nums ? Math.max(...nums.map(Number)) : null;
+
+    seen.add(albumId);
+    albums.push({
+      id: albumId,
+      title,
+      cover:      coverSrc,
+      photoCount,
+      albumUrl:   `https://${store}.x.yupoo.com/albums/${albumId}?uid=1`,
+      store,
+    });
+  });
+
+  return albums;
+}
+
+// ── HEALTH ────────────────────────────────────────────────────────────────────
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', stores: Object.keys(STORES), ts: new Date().toISOString() });
+});
+
+// ── STORES ────────────────────────────────────────────────────────────────────
+app.get('/api/stores', (_req, res) => {
+  res.json({
+    stores:  Object.keys(STORES).map(id => ({ id, url: `https://${id}.x.yupoo.com` })),
+    default: 'minkang',
+  });
+});
+
+// ── SEARCH ────────────────────────────────────────────────────────────────────
+// GET /api/search?store=minkang&q=flamengo
 app.get('/api/search', async (req, res) => {
   const { store, q } = req.query;
 
-  if (!store || !STORES[store]) {
+  if (!store || !STORES[store])
     return res.status(400).json({ error: `Loja inválida. Use: ${Object.keys(STORES).join(' ou ')}` });
-  }
-  if (!q) return res.status(400).json({ error: 'Parâmetro "q" é obrigatório.' });
+  if (!q)
+    return res.status(400).json({ error: 'Parâmetro "q" é obrigatório.' });
 
   try {
     const url = `https://${store}.x.yupoo.com/search/album?uid=1&sort=unix&q=${encodeURIComponent(q)}`;
-    console.log(`[SEARCH] ${url}`);
+    console.log('[SEARCH]', url);
 
-    const html = await fetchHTML(url, {
-      referer: `https://${store}.x.yupoo.com/albums`,
-      timeout: 20000,
+    const { data } = await axios.get(url, {
+      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
+      timeout: 15000,
     });
 
-    const $ = cheerio.load(html);
-    const albums = [];
-    const seen = new Set();
+    const $      = cheerio.load(data);
+    const albums = parseAlbums($, store);
 
-    $('a[href*="/albums/"]').each((i, el) => {
-      const href = $(el).attr('href') || '';
-      const albumMatch = href.match(/\/albums\/(\d+)/);
-      if (!albumMatch) return;
-
-      const albumId = albumMatch[1];
-      if (seen.has(albumId)) return;
-
-      // Capa: prioriza medium, fallback small
-      const img = $(el).find('img');
-      let coverSrc = img.filter('[src*="medium"]').first().attr('src')
-        || img.filter('[src*="small"]').first().attr('src')
-        || img.first().attr('src')
-        || img.first().attr('data-src')
-        || '';
-
-      if (!coverSrc.includes('photo.yupoo.com')) return;
-
-      // Sempre medium na capa
-      coverSrc = coverSrc.replace('/small.', '/medium.').replace('/thumb.', '/medium.');
-
-      // Título
-      const title = ($(el).attr('title')
-        || $(el).find('[class*="title"],[class*="name"]').first().text()
-        || $(el).text().split('\n')[0]
-        || `Álbum ${albumId}`).trim().replace(/\s*\d+\s*$/, '');
-
-      // Contagem de fotos (número solto no texto do card)
-      const nums = $(el).text().match(/\b(\d+)\b/g);
-      const photoCount = nums ? Math.max(...nums.map(Number)) : null;
-
-      seen.add(albumId);
-      albums.push({
-        id: albumId,
-        title,
-        cover: coverSrc,
-        photoCount,
-        albumUrl: `https://${store}.x.yupoo.com/albums/${albumId}?uid=1`,
-        store,
-      });
-    });
-
-    console.log(`[SEARCH] ${albums.length} álbuns encontrados`);
+    console.log(`[SEARCH] ${albums.length} álbuns`);
     res.json({ results: albums, total: albums.length, query: q, store });
 
   } catch (err) {
@@ -96,34 +113,35 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// ── ALBUM PHOTOS ──────────────────────────────────────────────────────────────
-// GET /api/album?store=royal-sports&id=233026418
+// ── ALBUM ─────────────────────────────────────────────────────────────────────
+// GET /api/album?store=minkang&id=123456
 app.get('/api/album', async (req, res) => {
   const { store, id } = req.query;
 
   if (!store || !STORES[store]) return res.status(400).json({ error: 'Loja inválida.' });
-  if (!id) return res.status(400).json({ error: 'Parâmetro "id" é obrigatório.' });
+  if (!id)                       return res.status(400).json({ error: 'Parâmetro "id" é obrigatório.' });
 
   try {
     const url = `https://${store}.x.yupoo.com/albums/${id}?uid=1`;
-    console.log(`[ALBUM] ${url}`);
+    console.log('[ALBUM]', url);
 
-    const html = await fetchHTML(url, {
-      referer: `https://${store}.x.yupoo.com/albums`,
-      timeout: 20000,
+    const { data } = await axios.get(url, {
+      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
+      timeout: 15000,
     });
 
-    const $ = cheerio.load(html);
+    const $ = cheerio.load(data);
 
-    const title = ($('h1').first().text()
-      || $('[class*="album__title"],[class*="albumTitle"]').first().text()
-      || `Álbum ${id}`).trim().replace(/\s*\d+\s*$/, '');
+    const title = (
+      $('h1').first().text() ||
+      $('[class*="album__title"],[class*="albumTitle"]').first().text() ||
+      `Álbum ${id}`
+    ).trim().replace(/\s*\d+\s*$/, '');
 
-    // Deduplicar por hash — mesma foto aparece como small + medium no HTML
     const hashSeen = new Set();
-    const photos = [];
+    const photos   = [];
 
-    $('img').each((i, el) => {
+    $('img').each((_, el) => {
       const src = $(el).attr('src') || $(el).attr('data-src') || '';
       if (!src.includes('photo.yupoo.com')) return;
 
@@ -134,16 +152,15 @@ app.get('/api/album', async (req, res) => {
       if (hashSeen.has(hash)) return;
       hashSeen.add(hash);
 
-      // Sempre medium: qualidade boa e leve
-      const mediumSrc = src
-        .replace('/small.', '/medium.')
-        .replace('/thumb.', '/medium.')
-        .replace('/large.', '/medium.');
-
-      photos.push(mediumSrc);
+      photos.push(
+        src
+          .replace('/small.', '/medium.')
+          .replace('/thumb.', '/medium.')
+          .replace('/large.', '/medium.')
+      );
     });
 
-    console.log(`[ALBUM] ${photos.length} fotos únicas`);
+    console.log(`[ALBUM] ${photos.length} fotos`);
     res.json({ id, title, photos, total: photos.length, albumUrl: url });
 
   } catch (err) {
@@ -156,22 +173,22 @@ app.get('/api/album', async (req, res) => {
 // GET /api/image?url=https://photo.yupoo.com/...
 app.get('/api/image', async (req, res) => {
   const { url } = req.query;
-  if (!url) return res.status(400).send('URL obrigatória');
-  if (!url.includes('yupoo.com')) return res.status(403).send('Domínio não permitido');
+  if (!url)                        return res.status(400).send('URL obrigatória');
+  if (!url.includes('yupoo.com'))  return res.status(403).send('Domínio não permitido');
 
   try {
     const response = await axios.get(url, {
       headers: {
         ...HEADERS,
         Referer: 'https://www.yupoo.com/',
-        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        Accept:  'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
       },
       responseType: 'arraybuffer',
-      timeout: 12000,
+      timeout:      12000,
     });
 
     const ct = response.headers['content-type'] || 'image/jpeg';
-    res.set('Content-Type', ct);
+    res.set('Content-Type',  ct);
     res.set('Cache-Control', 'public, max-age=86400');
     res.send(response.data);
 
@@ -181,66 +198,27 @@ app.get('/api/image', async (req, res) => {
   }
 });
 
-// ── CATEGORY BROWSE ──────────────────────────────────────────────────────────
+// ── CATEGORY ──────────────────────────────────────────────────────────────────
 // GET /api/category?store=minkang&id=5062328
-// Fetches albums directly from a Yupoo category page (more reliable than search for pre-loaded sections)
 app.get('/api/category', async (req, res) => {
   const { store, id, page = 1 } = req.query;
 
   if (!store || !STORES[store]) return res.status(400).json({ error: 'Loja inválida.' });
-  if (!id) return res.status(400).json({ error: 'Parâmetro "id" é obrigatório.' });
+  if (!id)                       return res.status(400).json({ error: 'Parâmetro "id" é obrigatório.' });
 
   try {
     const url = `https://${store}.x.yupoo.com/categories/${id}?uid=1&page=${page}`;
-    console.log(`[CATEGORY] ${url}`);
+    console.log('[CATEGORY]', url);
 
-    const html = await fetchHTML(url, {
-      referer: `https://${store}.x.yupoo.com/albums`,
-      timeout: 20000,
+    const { data } = await axios.get(url, {
+      headers: { ...HEADERS, Referer: `https://${store}.x.yupoo.com/albums` },
+      timeout: 15000,
     });
 
-    const $ = cheerio.load(html);
-    const albums = [];
-    const seen = new Set();
+    const $      = cheerio.load(data);
+    const albums = parseAlbums($, store);
 
-    $('a[href*="/albums/"]').each((i, el) => {
-      const href = $(el).attr('href') || '';
-      const albumMatch = href.match(/\/albums\/(\d+)/);
-      if (!albumMatch) return;
-
-      const albumId = albumMatch[1];
-      if (seen.has(albumId)) return;
-
-      const img = $(el).find('img');
-      let coverSrc = img.filter('[src*="medium"]').first().attr('src')
-        || img.filter('[src*="small"]').first().attr('src')
-        || img.first().attr('src')
-        || img.first().attr('data-src')
-        || '';
-
-      if (!coverSrc.includes('photo.yupoo.com')) return;
-      coverSrc = coverSrc.replace('/small.', '/medium.').replace('/thumb.', '/medium.');
-
-      const title = ($(el).attr('title')
-        || $(el).find('[class*="title"],[class*="name"]').first().text()
-        || $(el).text().split('\n')[0]
-        || `Álbum ${albumId}`).trim().replace(/\s*\d+\s*$/, '');
-
-      const nums = $(el).text().match(/\b(\d+)\b/g);
-      const photoCount = nums ? Math.max(...nums.map(Number)) : null;
-
-      seen.add(albumId);
-      albums.push({
-        id: albumId,
-        title,
-        cover: coverSrc,
-        photoCount,
-        albumUrl: `https://${store}.x.yupoo.com/albums/${albumId}?uid=1`,
-        store,
-      });
-    });
-
-    console.log(`[CATEGORY] ${albums.length} álbuns encontrados`);
+    console.log(`[CATEGORY] ${albums.length} álbuns`);
     res.json({ results: albums, total: albums.length, categoryId: id, store });
 
   } catch (err) {
@@ -249,20 +227,9 @@ app.get('/api/category', async (req, res) => {
   }
 });
 
-// ── STORES & HEALTH ───────────────────────────────────────────────────────────
-app.get('/api/stores', (req, res) => {
-  res.json({
-    stores: Object.keys(STORES).map(id => ({ id, url: `https://${id}.x.yupoo.com` })),
-    default: 'minkang',
-  });
-});
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', stores: Object.keys(STORES), ts: new Date().toISOString() });
-});
-
+// ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🚀 Dibraria backend: http://localhost:${PORT}`);
+  console.log(`\n🚀 Dibraria backend rodando na porta ${PORT}`);
   console.log(`📦 Lojas: ${Object.keys(STORES).join(', ')}`);
-  console.log(`🔍 Teste: http://localhost:${PORT}/api/search?store=royal-sports&q=flamengo\n`);
+  console.log(`🔍 Health: http://localhost:${PORT}/api/health\n`);
 });
